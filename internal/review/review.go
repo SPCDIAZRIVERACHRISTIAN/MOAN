@@ -104,10 +104,28 @@ func Run() (ReviewResult, error) {
 func buildReviewPrompt(files []FileChange, diffContent string) string {
 	var b strings.Builder
 
-	b.WriteString("Review this git diff.\n")
-	b.WriteString("Focus on bugs, risky changes, architecture concerns, maintainability, and security.\n")
-	b.WriteString("Only review the changes shown in the diff. Do not invent unrelated files or issues.\n")
-	b.WriteString("Be concise and structured.\n\n")
+	b.WriteString("You are reviewing a git diff.\n\n")
+	b.WriteString("Review rules:\n")
+	b.WriteString("- Only review changes that are directly shown in the provided diff.\n")
+	b.WriteString("- Do not invent files, functions, risks, or behavior that are not visible in the diff.\n")
+	b.WriteString("- Do not give generic best-practice advice unless it is tied to a specific changed line or behavior.\n")
+	b.WriteString("- Do not classify something as a security issue unless there is a concrete security risk in the diff.\n")
+	b.WriteString("- Prefer fewer high-quality findings over many weak findings.\n")
+	b.WriteString("- If the diff does not contain meaningful issues, say: \"No major issues found.\"\n\n")
+	b.WriteString("For each finding, use this exact format:\n\n")
+	b.WriteString("### Finding <number>\n\n")
+	b.WriteString("File: <file path>\n")
+	b.WriteString("Severity: critical | high | medium | low\n")
+	b.WriteString("Category: bug | security | architecture | maintainability | test\n")
+	b.WriteString("Issue: <specific issue found in the diff>\n")
+	b.WriteString("Evidence: <quote or describe the exact changed line/behavior that supports the finding>\n")
+	b.WriteString("Why it matters: <practical impact>\n")
+	b.WriteString("Suggested fix: <concrete fix>\n\n")
+	b.WriteString("After the findings, include:\n\n")
+	b.WriteString("### Summary\n")
+	b.WriteString("- <short summary of the most important risk>\n")
+	b.WriteString("- <recommended next action>\n\n")
+	b.WriteString("Do not include sections for files that have no meaningful issues.\n\n")
 
 	b.WriteString("Changed files:\n")
 	for _, f := range files {
