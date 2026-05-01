@@ -1,25 +1,33 @@
 package review
 
 import (
+	"context"
 	"fmt"
+	"strings"
+	"time"
 
+	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/config"
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/git"
+	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/provider"
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/validate"
 )
 
 type FileChange struct {
-	Path				string
-	Additions		int
-	Deletions		int
+	Path      string
+	Additions int
+	Deletions int
 }
 
 type ReviewResult struct {
-	Ready	bool
-	Files	[]FileChange
+	Ready         bool
+	Provider      string
+	Model         string
+	Files         []FileChange
+	ReviewContent string
 }
 
 func Run() (ReviewResult, error) {
-	validationResult, error := validate.Run()
+	validationResult, err := validate.Run()
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("run validation: %w", err)
 	}
@@ -31,23 +39,74 @@ func Run() (ReviewResult, error) {
 		}, nil
 	}
 
-	changedFiles,err := git.GetChangedFileStats()
+	cfg, err := config.Load()
 	if err != nil {
-		return ReviewResult{}, ftm.Error("get changed file stats: %w", err)
+		return ReviewResult{}, fmt.Errorf("load config: %w", err)
+	}
+
+	changedFiles, err := git.GetChangedFileStats()
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("get changed file stats: %w", err)
 	}
 
 	result := ReviewResult{
-		Ready: len(changedFiles) > 0,
-		Files: make([]FileChange, 0, len(changedFiles)),
+		Ready:    len(changedFiles) > 0,
+		Provider: cfg.Provider,
+		Model:    cfg.Model,
+		Files:    make([]FileChange, 0, len(changedFiles)),
 	}
 
 	for _, file := range changedFiles {
 		result.Files = append(result.Files, FileChange{
-			Path:				file.Path,
-			Additions:	file.Additions,
-			Deletions:	file.Deletions,
+			Path:      file.Path,
+			Additions: file.Additions,
+			Deletions: file.Deletions,
 		})
 	}
 
+	if !result.Ready {
+		return result, nil
+	}
+
+	p, err := provider.New(cfg)
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("build provider: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	prompt := buildReviewPrompt(result.Files)
+
+	resp, err := p.Review(ctx, provider.ReviewRequest{
+		Model:        cfg.Model,
+		SystemPrompt: cfg.SystemPrompt,
+		Messages: []provider.Message{
+			{
+				Role:    "user",
+				Content: prompt,
+			},
+		},
+	})
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("run model review: %w", err)
+	}
+
+	result.ReviewContent = resp.Content
 	return result, nil
+}
+
+func buildReviewPrompt(files []FileChange) string {
+	var b strings.Builder
+
+	b.WriteString("Review this git change summary.\n")
+	b.WriteString("Focus on bugs, risky changes, architecture concerns, maintainability, and security.\n")
+	b.WriteString("Be concise and structured.\n\n")
+	b.WriteString("Changed files:\n")
+
+	for _, f := range files {
+		fmt.Fprintf(&b, "- %s | additions=%d deletions=%d\n", f.Path, f.Additions, f.Deletions)
+	}
+
+	return b.String()
 }

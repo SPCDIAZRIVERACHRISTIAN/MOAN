@@ -1,5 +1,5 @@
 /*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
+Copyright © 2026 NAME HERE  christianda3@gmail.com
 
 */
 package cmd
@@ -26,7 +26,9 @@ var reviewCmd = &cobra.Command{
 			return fmt.Errorf("review failed validation")
 		}
 
-		fmt.Printf("STATUS: READY\n")
+		fmt.Println("STATUS: READY")
+		fmt.Printf("Provider: %s\n", result.Provider)
+		fmt.Printf("Model: %s\n", result.Model)
 		fmt.Printf("Files changed: %d\n\n", len(result.Files))
 
 		for _, file := range result.Files {

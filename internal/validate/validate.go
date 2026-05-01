@@ -3,6 +3,7 @@ package validate
 import (
 	"fmt"
 
+	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/config"
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/git"
 )
 
@@ -27,6 +28,11 @@ func Run() (Result, error) {
 		checkInsideRepo(repoState),
 		checkHasHead(repoState),
 		checkHasChanges(repoState),
+	}
+
+	if repoState.InsideRepo {
+		cfgCheck := checkConfig()
+		checks = append(checks, cfgCheck)
 	}
 
 	valid := true
@@ -105,5 +111,30 @@ func checkHasChanges(state git.State) Check {
 		Name:    "workspace-changes",
 		Passed:  false,
 		Message: "no staged, unstaged, or untracked changes detected",
+	}
+}
+
+func checkConfig() Check {
+	cfg, err := config.Load()
+	if err != nil {
+		return Check{
+			Name:    "config",
+			Passed:  false,
+			Message: err.Error(),
+		}
+	}
+
+	if err := config.Validate(cfg); err != nil {
+		return Check{
+			Name:    "config",
+			Passed:  false,
+			Message: err.Error(),
+		}
+	}
+
+	return Check{
+		Name:    "config",
+		Passed:  true,
+		Message: "configuration is valid",
 	}
 }
