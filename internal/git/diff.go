@@ -97,3 +97,31 @@ func combineNumstatOutputs(unstaged string, staged string) string {
 		return unstaged + "\n" + staged
 	}
 }
+
+func GetDiffContent() (string, error) {
+	unstaged, err := runGit("diff")
+	if err != nil {
+		return "", err
+	}
+
+	staged, err := runGit("diff", "--cached")
+	if err != nil {
+		return "", err
+	}
+
+	var diff string
+
+	if unstaged != "" {
+		diff += "UNSTAGED CHANGES:\n"
+		diff += unstaged
+		diff += "\n"
+	}
+
+	if staged != "" {
+		diff += "STAGED CHANGES:\n"
+		diff += staged
+		diff += "\n"
+	}
+
+	return diff, nil
+}

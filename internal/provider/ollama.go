@@ -22,7 +22,7 @@ func NewOllamaProvider(baseURL string) *OllamaProvider {
 	return &OllamaProvider{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 600 * time.Second,
 		},
 	}
 }

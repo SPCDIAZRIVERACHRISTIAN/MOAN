@@ -76,7 +76,12 @@ func Run() (ReviewResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	prompt := buildReviewPrompt(result.Files)
+	diffContent, err := git.GetDiffContent()
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("get diff content: %w", err)
+	}
+
+	prompt := buildReviewPrompt(result.Files, diffContent)
 
 	resp, err := p.Review(ctx, provider.ReviewRequest{
 		Model:        cfg.Model,
@@ -96,16 +101,22 @@ func Run() (ReviewResult, error) {
 	return result, nil
 }
 
-func buildReviewPrompt(files []FileChange) string {
+func buildReviewPrompt(files []FileChange, diffContent string) string {
 	var b strings.Builder
 
-	b.WriteString("Review this git change summary.\n")
+	b.WriteString("Review this git diff.\n")
 	b.WriteString("Focus on bugs, risky changes, architecture concerns, maintainability, and security.\n")
+	b.WriteString("Only review the changes shown in the diff. Do not invent unrelated files or issues.\n")
 	b.WriteString("Be concise and structured.\n\n")
-	b.WriteString("Changed files:\n")
 
+	b.WriteString("Changed files:\n")
 	for _, f := range files {
 		fmt.Fprintf(&b, "- %s | additions=%d deletions=%d\n", f.Path, f.Additions, f.Deletions)
+	}
+
+	if diffContent != "" {
+		b.WriteString("\nFull git diff:\n")
+		b.WriteString(diffContent)
 	}
 
 	return b.String()
