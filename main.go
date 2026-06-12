@@ -1,6 +1,5 @@
 /*
 Copyright © 2026 Christian Diaz
-
 */
 package main
 

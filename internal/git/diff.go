@@ -7,15 +7,23 @@ import (
 )
 
 type ChangedFileStat struct {
-	Path				string
-	Additions		int
-	Deletions		int
+	Path      string
+	Additions int
+	Deletions int
 }
 
-func GetChangedFileStats() ([]ChangedFileStat, error) {
-	out, err := runGit("diff", "--numstat")
-	if err != nil {
-		return nil, fmt.Errorf("get unstaged diff stats: %w", err)
+// GetChangedFileStats returns per-file addition/deletion counts. With
+// stagedOnly it inspects only the index; otherwise staged and unstaged
+// changes are combined per file.
+func GetChangedFileStats(stagedOnly bool) ([]ChangedFileStat, error) {
+	var out string
+	var err error
+
+	if !stagedOnly {
+		out, err = runGit("diff", "--numstat")
+		if err != nil {
+			return nil, fmt.Errorf("get unstaged diff stats: %w", err)
+		}
 	}
 
 	cachedOut, err := runGit("diff", "--cached", "--numstat")
@@ -98,10 +106,17 @@ func combineNumstatOutputs(unstaged string, staged string) string {
 	}
 }
 
-func GetDiffContent() (string, error) {
-	unstaged, err := runGit("diff")
-	if err != nil {
-		return "", err
+// GetDiffContent returns the full diff text. With stagedOnly only the
+// index diff is included.
+func GetDiffContent(stagedOnly bool) (string, error) {
+	var unstaged string
+	var err error
+
+	if !stagedOnly {
+		unstaged, err = runGit("diff")
+		if err != nil {
+			return "", err
+		}
 	}
 
 	staged, err := runGit("diff", "--cached")

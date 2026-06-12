@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,8 +10,30 @@ import (
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/config"
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/git"
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/provider"
-	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/validate"
 )
+
+var (
+	ErrNotRepo      = errors.New("current directory is not a git repository")
+	ErrNoCommits    = errors.New("repository has no commits yet; make an initial commit before running moan review")
+	ErrNoChanges    = errors.New("no Git changes found. Modify files or stage changes before running moan review")
+	ErrDiffTooLarge = errors.New("diff is too large for a single review")
+	ErrTooManyFiles = errors.New("too many changed files for a single review")
+)
+
+// ProviderError marks failures that came from the AI provider so the CLI
+// can map them to a distinct exit code.
+type ProviderError struct {
+	Err error
+}
+
+func (e *ProviderError) Error() string { return e.Err.Error() }
+func (e *ProviderError) Unwrap() error { return e.Err }
+
+type Options struct {
+	StagedOnly    bool
+	AllowTruncate bool
+	DryRun        bool
+}
 
 type FileChange struct {
 	Path      string
@@ -19,40 +42,53 @@ type FileChange struct {
 }
 
 type ReviewResult struct {
-	Ready         bool
 	Provider      string
 	Model         string
+	Scope         string
 	Files         []FileChange
+	DiffChars     int
+	PromptChars   int
+	Truncated     bool
+	DryRun        bool
 	ReviewContent string
 }
 
-func Run() (ReviewResult, error) {
-	validationResult, err := validate.Run()
+func Run(cfg config.Config, opts Options) (ReviewResult, error) {
+	state, err := git.GetState()
 	if err != nil {
-		return ReviewResult{}, fmt.Errorf("run validation: %w", err)
+		return ReviewResult{}, fmt.Errorf("load git state: %w", err)
 	}
 
-	if !validationResult.Valid {
-		return ReviewResult{
-			Ready: false,
-			Files: []FileChange{},
-		}, nil
+	if !state.InsideRepo {
+		return ReviewResult{}, ErrNotRepo
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return ReviewResult{}, fmt.Errorf("load config: %w", err)
+	if !state.HasHead {
+		return ReviewResult{}, ErrNoCommits
 	}
 
-	changedFiles, err := git.GetChangedFileStats()
+	changedFiles, err := git.GetChangedFileStats(opts.StagedOnly)
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("get changed file stats: %w", err)
 	}
 
+	if len(changedFiles) == 0 {
+		if opts.StagedOnly {
+			return ReviewResult{}, fmt.Errorf("%w (no staged changes; stage files with git add or drop --staged)", ErrNoChanges)
+		}
+		return ReviewResult{}, ErrNoChanges
+	}
+
+	scope := "staged + unstaged"
+	if opts.StagedOnly {
+		scope = "staged only"
+	}
+
 	result := ReviewResult{
-		Ready:    len(changedFiles) > 0,
 		Provider: cfg.Provider,
-		Model:    cfg.Model,
+		Model:    cfg.ResolvedModel(),
+		Scope:    scope,
+		DryRun:   opts.DryRun,
 		Files:    make([]FileChange, 0, len(changedFiles)),
 	}
 
@@ -64,7 +100,31 @@ func Run() (ReviewResult, error) {
 		})
 	}
 
-	if !result.Ready {
+	if len(result.Files) > cfg.MaxFiles {
+		return ReviewResult{}, fmt.Errorf("%w: %d files changed, limit is %d.\nTry staging fewer files or increasing --max-files",
+			ErrTooManyFiles, len(result.Files), cfg.MaxFiles)
+	}
+
+	diffContent, err := git.GetDiffContent(opts.StagedOnly)
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("get diff content: %w", err)
+	}
+
+	result.DiffChars = len(diffContent)
+
+	if len(diffContent) > cfg.MaxDiffChars {
+		if !opts.AllowTruncate {
+			return ReviewResult{}, fmt.Errorf("%w: diff is %d chars, limit is %d.\nTry staging fewer files or increasing --max-diff-chars, or pass --allow-truncate",
+				ErrDiffTooLarge, len(diffContent), cfg.MaxDiffChars)
+		}
+		diffContent = diffContent[:cfg.MaxDiffChars]
+		result.Truncated = true
+	}
+
+	prompt := buildReviewPrompt(result.Files, diffContent, result.Truncated)
+	result.PromptChars = len(prompt)
+
+	if opts.DryRun {
 		return result, nil
 	}
 
@@ -73,18 +133,11 @@ func Run() (ReviewResult, error) {
 		return ReviewResult{}, fmt.Errorf("build provider: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()
 
-	diffContent, err := git.GetDiffContent()
-	if err != nil {
-		return ReviewResult{}, fmt.Errorf("get diff content: %w", err)
-	}
-
-	prompt := buildReviewPrompt(result.Files, diffContent)
-
 	resp, err := p.Review(ctx, provider.ReviewRequest{
-		Model:        cfg.Model,
+		Model:        result.Model,
 		SystemPrompt: cfg.SystemPrompt,
 		Messages: []provider.Message{
 			{
@@ -94,14 +147,14 @@ func Run() (ReviewResult, error) {
 		},
 	})
 	if err != nil {
-		return ReviewResult{}, fmt.Errorf("run model review: %w", err)
+		return ReviewResult{}, &ProviderError{Err: err}
 	}
 
 	result.ReviewContent = resp.Content
 	return result, nil
 }
 
-func buildReviewPrompt(files []FileChange, diffContent string) string {
+func buildReviewPrompt(files []FileChange, diffContent string, truncated bool) string {
 	var b strings.Builder
 
 	b.WriteString("You are MOAN, a strict code review agent.\n\n")
@@ -177,6 +230,19 @@ func buildReviewPrompt(files []FileChange, diffContent string) string {
 
 	b.WriteString("FINAL DECISION:\n")
 	b.WriteString("Briefly explain why the diff is READY or NEEDS_CHANGES.\n\n")
+
+	b.WriteString("Your output MUST end with this exact block, with real counts:\n\n")
+	b.WriteString("SUMMARY\n")
+	b.WriteString("-------\n")
+	b.WriteString("Status: READY or NEEDS WORK\n")
+	b.WriteString("Critical: <count>\n")
+	b.WriteString("High: <count>\n")
+	b.WriteString("Medium: <count>\n")
+	b.WriteString("Low: <count>\n\n")
+
+	if truncated {
+		b.WriteString("NOTE: The git diff below was TRUNCATED because it exceeded the size limit. Review what is visible and do not guess about missing content.\n\n")
+	}
 
 	b.WriteString("Changed files:\n")
 	for _, f := range files {

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 type OllamaProvider struct {
@@ -16,15 +15,17 @@ type OllamaProvider struct {
 	httpClient *http.Client
 }
 
+// Request deadlines come from the caller's context, so the client itself
+// has no timeout.
 func NewOllamaProvider(baseURL string) *OllamaProvider {
-	baseURL = strings.TrimRight(baseURL, "/")
-
 	return &OllamaProvider{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 600 * time.Second,
-		},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		httpClient: &http.Client{},
 	}
+}
+
+func (p *OllamaProvider) connectError(err error) error {
+	return fmt.Errorf("could not connect to Ollama at %s.\nMake sure Ollama is running:\n  ollama serve\n(%v)", p.baseURL, err)
 }
 
 func (p *OllamaProvider) TestConnection(ctx context.Context) error {
@@ -35,7 +36,7 @@ func (p *OllamaProvider) TestConnection(ctx context.Context) error {
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("connect to ollama: %w", err)
+		return p.connectError(err)
 	}
 	defer resp.Body.Close()
 
@@ -72,7 +73,7 @@ func (p *OllamaProvider) Review(ctx context.Context, req ReviewRequest) (ReviewR
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return ReviewResponse{}, fmt.Errorf("send ollama request: %w", err)
+		return ReviewResponse{}, p.connectError(err)
 	}
 	defer resp.Body.Close()
 

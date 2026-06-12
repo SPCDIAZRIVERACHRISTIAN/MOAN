@@ -1,140 +1,124 @@
 package validate
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/config"
 	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/git"
+	"github.com/SPCDIAZRIVERACHRISTIAN/moan/internal/provider"
 )
 
-type Check struct {
-	Name    string
-	Passed  bool
-	Message string
+const connectionTestTimeout = 15 * time.Second
+
+type Item struct {
+	Label string
+	Value string
+	OK    bool
 }
 
 type Result struct {
-	Valid  bool
-	Checks []Check
+	Valid bool
+	Items []Item
 }
 
-func Run() (Result, error) {
-	repoState, err := git.GetState()
-	if err != nil {
-		return Result{}, fmt.Errorf("load git state: %w", err)
+// Run performs the full pre-review check list: git state, config,
+// provider/model selection, API key presence, and provider connectivity.
+func Run(cfg config.Config) Result {
+	var items []Item
+	ok := func(label, value string) { items = append(items, Item{Label: label, Value: value, OK: true}) }
+	fail := func(label, value string) { items = append(items, Item{Label: label, Value: value, OK: false}) }
+
+	state, err := git.GetState()
+	switch {
+	case err != nil:
+		fail("Git repository", fmt.Sprintf("FAIL - %v", err))
+	case !state.InsideRepo:
+		fail("Git repository", "FAIL - current directory is not a git repository")
+	case !state.HasHead:
+		fail("Git repository", "FAIL - repository has no commits yet")
+	default:
+		ok("Git repository", "OK")
 	}
 
-	checks := []Check{
-		checkInsideRepo(repoState),
-		checkHasHead(repoState),
-		checkHasChanges(repoState),
+	if state.InsideRepo && state.HasHead {
+		if state.StagedChanges || state.UnstagedChanges || state.UntrackedFiles {
+			ok("Git changes", fmt.Sprintf("OK (%d files)", len(state.ChangedFiles)))
+		} else {
+			fail("Git changes", "FAIL - no changes found. Modify files or stage changes before running moan review")
+		}
 	}
 
-	if repoState.InsideRepo {
-		cfgCheck := checkConfig()
-		checks = append(checks, cfgCheck)
+	configPath, pathErr := config.Path()
+	switch {
+	case pathErr != nil:
+		fail("Config", fmt.Sprintf("FAIL - %v", pathErr))
+	case config.Exists():
+		ok("Config", fmt.Sprintf("OK (%s)", configPath))
+	default:
+		ok("Config", fmt.Sprintf("OK (no file at %s, using defaults)", configPath))
+	}
+
+	providerOK := config.SupportedProvider(cfg.Provider)
+	if providerOK {
+		ok("Provider", cfg.Provider)
+	} else {
+		fail("Provider", fmt.Sprintf("FAIL - unsupported provider %q (supported: ollama, openai, anthropic)", cfg.Provider))
+	}
+
+	model := cfg.ResolvedModel()
+	if model != "" {
+		ok("Model", model)
+	} else {
+		fail("Model", "FAIL - no model configured. Set one with: moan config set-model <model>")
+	}
+
+	keyOK := true
+	switch cfg.Provider {
+	case config.ProviderOllama:
+		ok("API key", "not required")
+	case config.ProviderOpenAI:
+		if cfg.OpenAI.APIKey != "" {
+			ok("API key", "OK")
+		} else {
+			keyOK = false
+			fail("API key", "FAIL - missing. Set it with: moan config set-openai-key <key> or export OPENAI_API_KEY=<key>")
+		}
+	case config.ProviderAnthropic:
+		if cfg.Anthropic.APIKey != "" {
+			ok("API key", "OK")
+		} else {
+			keyOK = false
+			fail("API key", "FAIL - missing. Set it with: moan config set-anthropic-key <key> or export ANTHROPIC_API_KEY=<key>")
+		}
+	}
+
+	if providerOK && keyOK {
+		p, err := provider.New(cfg)
+		if err != nil {
+			fail("Connection", fmt.Sprintf("FAIL - %v", err))
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), connectionTestTimeout)
+			defer cancel()
+
+			if err := p.TestConnection(ctx); err != nil {
+				fail("Connection", fmt.Sprintf("FAIL - %v", err))
+			} else {
+				ok("Connection", "OK")
+			}
+		}
+	} else {
+		fail("Connection", "skipped (fix provider/key issues first)")
 	}
 
 	valid := true
-	for _, check := range checks {
-		if !check.Passed {
+	for _, item := range items {
+		if !item.OK {
 			valid = false
 			break
 		}
 	}
 
-	return Result{
-		Valid:  valid,
-		Checks: checks,
-	}, nil
-}
-
-func checkInsideRepo(state git.State) Check {
-	if state.InsideRepo {
-		return Check{
-			Name:    "git-repository",
-			Passed:  true,
-			Message: "inside a git repository",
-		}
-	}
-
-	return Check{
-		Name:    "git-repository",
-		Passed:  false,
-		Message: "current directory is not a git repository",
-	}
-}
-
-func checkHasHead(state git.State) Check {
-	if !state.InsideRepo {
-		return Check{
-			Name:    "repository-head",
-			Passed:  false,
-			Message: "cannot verify HEAD outside a git repository",
-		}
-	}
-
-	if state.HasHead {
-		return Check{
-			Name:    "repository-head",
-			Passed:  true,
-			Message: "repository has at least one commit",
-		}
-	}
-
-	return Check{
-		Name:    "repository-head",
-		Passed:  false,
-		Message: "repository has no commits yet; HEAD is missing",
-	}
-}
-
-func checkHasChanges(state git.State) Check {
-	if !state.InsideRepo {
-		return Check{
-			Name:    "workspace-changes",
-			Passed:  false,
-			Message: "cannot inspect changes outside a git repository",
-		}
-	}
-
-	hasChanges := state.StagedChanges || state.UnstagedChanges || state.UntrackedFiles
-	if hasChanges {
-		return Check{
-			Name:    "workspace-changes",
-			Passed:  true,
-			Message: fmt.Sprintf("changes detected (%d files)", len(state.ChangedFiles)),
-		}
-	}
-
-	return Check{
-		Name:    "workspace-changes",
-		Passed:  false,
-		Message: "no staged, unstaged, or untracked changes detected",
-	}
-}
-
-func checkConfig() Check {
-	cfg, err := config.Load()
-	if err != nil {
-		return Check{
-			Name:    "config",
-			Passed:  false,
-			Message: err.Error(),
-		}
-	}
-
-	if err := config.Validate(cfg); err != nil {
-		return Check{
-			Name:    "config",
-			Passed:  false,
-			Message: err.Error(),
-		}
-	}
-
-	return Check{
-		Name:    "config",
-		Passed:  true,
-		Message: "configuration is valid",
-	}
+	return Result{Valid: valid, Items: items}
 }
